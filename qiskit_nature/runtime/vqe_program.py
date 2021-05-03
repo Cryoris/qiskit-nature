@@ -19,11 +19,13 @@ import numpy as np
 from qiskit import IBMQ
 from qiskit import QuantumCircuit
 from qiskit.providers import Provider
+from qiskit.providers.ibmq.exceptions import IBMQNotAuthorizedError
 from qiskit.providers.backend import Backend
 from qiskit.algorithms import MinimumEigensolver
 from qiskit.algorithms import MinimumEigensolverResult
 from qiskit.algorithms.optimizers import Optimizer
-from qiskit.opflow import OperatorBase
+from qiskit.opflow import OperatorBase, PauliSumOp
+from qiskit.quantum_info import SparsePauliOp
 
 
 class VQEProgram(MinimumEigensolver):
@@ -33,8 +35,9 @@ class VQEProgram(MinimumEigensolver):
                  ansatz: QuantumCircuit,
                  optimizer_name: str = 'SPSA',
                  optimizer_settings: Optional[Dict[str, Any]] = None,
-                 backend: Optional[Backend] = None,
                  initial_point: Optional[Union[List, np.ndarray]] = None,
+                 provider: Optional[Provider] = None,
+                 backend: Optional[Backend] = None,
                  shots: int = 1024,
                  readout_error_mitigation: bool = True,
                  callback: Optional[Callable[[int, np.ndarray, float, float], None]] = None
@@ -62,10 +65,8 @@ class VQEProgram(MinimumEigensolver):
         # define program name
         self._program_name = 'vqe'
 
-        # set runtime
-        self._provider = IBMQ.get_provider(project='qiskit-runtime')
-
         # store settings
+        self._provider = None
         self._ansatz = ansatz
         self._optimizer_name = None
         self._optimizer_settings = optimizer_settings
@@ -76,16 +77,25 @@ class VQEProgram(MinimumEigensolver):
         self._callback = callback
 
         # use setter to check for valid inputs
+        if provider is not None:
+            self.provider = provider
+
         self.optimizer_name = optimizer_name
 
     @property
-    def provider(self) -> Provider:
+    def provider(self) -> Optional[Provider]:
         """Return the provider."""
         return self._provider
 
     @provider.setter
     def provider(self, provider: Provider) -> None:
         """Set the provider. Must be a provider that supports the runtime feature."""
+        try:
+            _ = hasattr(provider, 'runtime')
+        except IBMQNotAuthorizedError:
+            # pylint: disable=raise-missing-from
+            raise ValueError(f'The provider {provider} does not provide a runtime environment.')
+
         self._provider = provider
 
     @property
@@ -125,13 +135,13 @@ class VQEProgram(MinimumEigensolver):
         """Return the settings of the optimizer."""
         self._optimizer_settings = settings
 
-    @optimizer.setter
+    @optimizer_settings.setter
     def optimizer(self, optimizer: Optimizer) -> None:
         """ Sets the ansatz. """
         self._optimizer = optimizer
 
     @property
-    def backend(self) -> Backend:
+    def backend(self) -> Optional[Backend]:
         """Returns the backend."""
         return self._backend
 
@@ -226,6 +236,17 @@ class VQEProgram(MinimumEigensolver):
         """
         if self.backend is None:
             raise ValueError('The backend has not been set.')
+
+        if self.provider is None:
+            raise ValueError('The provider has not been set.')
+
+        if not isinstance(operator, PauliSumOp):
+            try:
+                primitive = SparsePauliOp(operator.primitive)
+                operator = PauliSumOp(primitive, operator.coeff)
+            except Exception as exc:
+                raise ValueError(f'Invalid type of the operator {type(operator)} '
+                                 'must be PauliSumOp, or castable to one.') from exc
 
         _validate_optimizer_settings(self.optimizer_name, self.optimizer_settings)
 
